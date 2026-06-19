@@ -4,6 +4,8 @@ import './App.css'
 function App() {
   const [file, setFile] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null);
   const fileInputRef = useRef(null);
 
   const handleDragOver = (e) => {
@@ -31,9 +33,9 @@ function App() {
   };
 
   const handleFileSelection = (selectedFile) => {
-    // Only accept video files
     if (selectedFile.type.startsWith('video/')) {
       setFile(selectedFile);
+      setUploadStatus(null);
     } else {
       alert('Por favor selecciona un archivo de video válido.');
     }
@@ -41,6 +43,36 @@ function App() {
 
   const triggerFileInput = () => {
     fileInputRef.current.click();
+  };
+
+  const handleUpload = async () => {
+    if (!file) return;
+    
+    setIsUploading(true);
+    setUploadStatus(null);
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+      const response = await fetch('http://localhost:8000/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setUploadStatus({ success: true, message: '¡Video subido exitosamente!' });
+        console.log('Upload success:', data);
+      } else {
+        throw new Error('Error al subir el video');
+      }
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploadStatus({ success: false, message: 'Hubo un error al subir el video. Asegúrate de que el backend esté corriendo.' });
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   return (
@@ -93,8 +125,42 @@ function App() {
           />
           
           {file ? (
-            <div style={{ marginTop: '1rem', color: 'var(--accent-primary)', fontWeight: '500' }}>
-              Archivo seleccionado: {file.name}
+            <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'center' }}>
+              <div style={{ color: 'var(--accent-primary)', fontWeight: '500' }}>
+                Archivo: {file.name}
+              </div>
+              {!uploadStatus?.success && (
+                <button 
+                  className="btn-primary" 
+                  onClick={handleUpload} 
+                  disabled={isUploading}
+                  style={{ opacity: isUploading ? 0.7 : 1, cursor: isUploading ? 'not-allowed' : 'pointer' }}
+                >
+                  {isUploading ? 'Subiendo...' : 'Procesar Video'}
+                  {!isUploading && (
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="5 3 19 12 5 21 5 3"/>
+                    </svg>
+                  )}
+                </button>
+              )}
+              {uploadStatus && (
+                <div style={{ 
+                  color: uploadStatus.success ? '#10b981' : '#ef4444', 
+                  backgroundColor: uploadStatus.success ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                  padding: '10px 15px',
+                  borderRadius: '8px',
+                  marginTop: '10px',
+                  fontSize: '0.9rem'
+                }}>
+                  {uploadStatus.message}
+                </div>
+              )}
+              {uploadStatus?.success && (
+                <button className="btn-primary" style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'white' }} onClick={() => {setFile(null); setUploadStatus(null);}}>
+                  Subir otro video
+                </button>
+              )}
             </div>
           ) : (
             <button className="btn-primary" onClick={triggerFileInput}>
