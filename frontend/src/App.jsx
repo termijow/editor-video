@@ -2,202 +2,334 @@ import { useState, useRef } from 'react'
 import './App.css'
 
 function App() {
-  const [file, setFile] = useState(null);
-  const [isDragging, setIsDragging] = useState(false);
+  const [media, setMedia] = useState([]);
+  const [timeline, setTimeline] = useState({
+    resolution: [1920, 1080],
+    tracks: [
+      { id: 'track-v1', type: 'video', name: 'Video 1', clips: [] },
+      { id: 'track-t1', type: 'text', name: 'Subtítulos', clips: [] }
+    ]
+  });
+  const [selectedClip, setSelectedClip] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState(null);
+  const [isRendering, setIsRendering] = useState(false);
+  const [renderResult, setRenderResult] = useState(null);
   const fileInputRef = useRef(null);
 
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
+  // === Media Library Logic ===
+  const triggerFileInput = () => fileInputRef.current.click();
 
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFileSelection(e.dataTransfer.files[0]);
-    }
-  };
-
-  const handleFileChange = (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      handleFileSelection(e.target.files[0]);
-    }
-  };
-
-  const handleFileSelection = (selectedFile) => {
-    if (selectedFile.type.startsWith('video/')) {
-      setFile(selectedFile);
-      setUploadStatus(null);
-    } else {
-      alert('Por favor selecciona un archivo de video válido.');
-    }
-  };
-
-  const triggerFileInput = () => {
-    fileInputRef.current.click();
-  };
-
-  const handleUpload = async () => {
-    if (!file) return;
+  const handleFileUpload = async (e) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const files = Array.from(e.target.files);
     
     setIsUploading(true);
-    setUploadStatus(null);
-    
-    const formData = new FormData();
-    formData.append('file', file);
     
     try {
-      const response = await fetch('http://localhost:8000/upload', {
-        method: 'POST',
-        body: formData,
+      const uploadPromises = files.map(async (file) => {
+        const formData = new FormData();
+        formData.append('file', file);
+        const response = await fetch('http://localhost:8001/upload_media', {
+          method: 'POST',
+          body: formData,
+        });
+        return await response.json();
       });
       
-      if (response.ok) {
-        const data = await response.json();
-        setUploadStatus({ success: true, message: '¡Video subido exitosamente!' });
-        console.log('Upload success:', data);
-      } else {
-        throw new Error('Error al subir el video');
-      }
+      const newMediaItems = await Promise.all(uploadPromises);
+      setMedia(prevMedia => [...prevMedia, ...newMediaItems]);
     } catch (error) {
-      console.error('Upload error:', error);
-      setUploadStatus({ success: false, message: 'Hubo un error al subir el video. Asegúrate de que el backend esté corriendo.' });
+      console.error("Upload error:", error);
+      alert("Error al subir archivo(s)");
     } finally {
       setIsUploading(false);
     }
   };
 
+  const addMediaToTimeline = (mediaItem) => {
+    // Add to first video track
+    const newTimeline = { ...timeline };
+    const track = newTimeline.tracks[0];
+    
+    // Find last end_time to append
+    let lastEnd = 0;
+    if (track.clips.length > 0) {
+      lastEnd = Math.max(...track.clips.map(c => c.end_time));
+    }
+    
+    const newClip = {
+      id: 'clip-' + Date.now(),
+      file_id: mediaItem.id,
+      name: mediaItem.name,
+      url: mediaItem.url,
+      start_time: lastEnd,
+      end_time: lastEnd + (mediaItem.duration || 5),
+      media_start: 0,
+      zoom: 1.0,
+      x: "center",
+      y: "center"
+    };
+    
+    track.clips.push(newClip);
+    setTimeline(newTimeline);
+  };
+
+  // === Timeline Logic ===
+  const selectClip = (trackIndex, clipIndex) => {
+    setSelectedClip({ trackIndex, clipIndex });
+  };
+
+  const updateSelectedClip = (field, value) => {
+    if (!selectedClip) return;
+    const { trackIndex, clipIndex } = selectedClip;
+    const newTimeline = { ...timeline };
+    newTimeline.tracks[trackIndex].clips[clipIndex][field] = value;
+    setTimeline(newTimeline);
+  };
+
+  const deleteSelectedClip = () => {
+    if (!selectedClip) return;
+    const { trackIndex, clipIndex } = selectedClip;
+    const newTimeline = { ...timeline };
+    newTimeline.tracks[trackIndex].clips.splice(clipIndex, 1);
+    setTimeline(newTimeline);
+    setSelectedClip(null);
+  };
+
+  // === AI Tools ===
+  const [isGeneratingSubs, setIsGeneratingSubs] = useState(false);
+  const generateAutoSubs = async () => {
+    if (!selectedClip) return;
+    const clip = timeline.tracks[selectedClip.trackIndex].clips[selectedClip.clipIndex];
+    if (timeline.tracks[selectedClip.trackIndex].type !== 'video') return;
+    
+    setIsGeneratingSubs(true);
+    try {
+      const response = await fetch('http://localhost:8001/generate_subtitles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_id: clip.file_id })
+      });
+      const data = await response.json();
+      
+      const newTimeline = { ...timeline };
+      const textTrack = newTimeline.tracks[1];
+      
+      data.segments.forEach((seg, i) => {
+        textTrack.clips.push({
+          id: 'sub-' + Date.now() + '-' + i,
+          text: seg.text,
+          start_time: clip.start_time + seg.start,
+          end_time: clip.start_time + seg.end,
+          color: "yellow",
+          fontsize: 60
+        });
+      });
+      
+      setTimeline(newTimeline);
+      alert("Subtítulos generados con éxito!");
+    } catch (error) {
+      console.error(error);
+      alert("Error generando subtítulos");
+    } finally {
+      setIsGeneratingSubs(false);
+    }
+  };
+
+  // === Export Logic ===
+  const renderVideo = async () => {
+    setIsRendering(true);
+    setRenderResult(null);
+    try {
+      const response = await fetch('http://localhost:8001/render', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeline })
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        setRenderResult(data.url);
+      } else {
+        alert("Error: " + data.detail);
+      }
+    } catch (error) {
+      console.error(error);
+      alert("Error al exportar");
+    } finally {
+      setIsRendering(false);
+    }
+  };
+
+  // Calculate timeline total width
+  const maxDuration = Math.max(
+    10, 
+    ...timeline.tracks.map(t => 
+      t.clips.length > 0 ? Math.max(...t.clips.map(c => c.end_time)) : 0
+    )
+  );
+  
+  const getSelectedClipData = () => {
+    if (!selectedClip) return null;
+    return timeline.tracks[selectedClip.trackIndex].clips[selectedClip.clipIndex];
+  };
+  const activeClip = getSelectedClipData();
+  
+  const handleResolutionChange = (e) => {
+    const [w, h] = e.target.value.split('x').map(Number);
+    setTimeline({ ...timeline, resolution: [w, h] });
+  };
+
   return (
-    <div className="app-container">
-      <header className="header">
-        <div className="logo-container">
-          <div className="logo-icon">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M2 12h4l3-9 5 18 3-9h5" />
-            </svg>
-          </div>
-          <span className="logo-text">Subtitula<span className="text-gradient">Pro</span></span>
+    <div className="nle-container">
+      <header className="nle-header">
+        <div className="logo-text">Subtitula<span className="text-gradient">Pro</span> Studio</div>
+        <div className="header-controls" style={{display: 'flex', gap: '15px', alignItems: 'center'}}>
+          <select 
+            value={`${timeline.resolution[0]}x${timeline.resolution[1]}`} 
+            onChange={handleResolutionChange}
+            style={{ padding: '8px', borderRadius: '6px', background: 'rgba(0,0,0,0.5)', color: 'white', border: '1px solid var(--border-color)' }}
+          >
+            <option value="1920x1080">Paisaje (16:9)</option>
+            <option value="1080x1920">Vertical (9:16)</option>
+            <option value="1080x1080">Cuadrado (1:1)</option>
+          </select>
+          <button className="btn-export" onClick={renderVideo} disabled={isRendering}>
+            {isRendering ? 'Renderizando...' : 'Exportar Video'}
+          </button>
         </div>
       </header>
 
-      <main className="main-content">
-        <section className="hero-section">
-          <h1 className="hero-title">
-            Inteligencia Artificial para <br/> <span className="text-gradient">tus videos</span>
-          </h1>
-          <p className="hero-subtitle">
-            Genera subtítulos automáticos con la potencia de tu PC y la comodidad de tu portátil. Rápido, preciso y sin esfuerzo.
-          </p>
-        </section>
-
-        <div 
-          className={`upload-card glass-panel ${isDragging ? 'dragging' : ''}`}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          style={isDragging ? { borderColor: 'var(--accent-primary)', transform: 'scale(1.02)' } : {}}
-        >
-          <div className="upload-icon-wrapper">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" x2="12" y1="3" y2="15" />
-            </svg>
-          </div>
+      <div className="nle-main">
+        {/* Left: Media Library */}
+        <div className="nle-panel media-library">
+          <h3>Archivos</h3>
+          <input type="file" ref={fileInputRef} onChange={handleFileUpload} style={{display: 'none'}} multiple />
+          <button className="btn-secondary" onClick={triggerFileInput} disabled={isUploading}>
+            {isUploading ? 'Subiendo...' : '+ Subir Archivo'}
+          </button>
           
-          <h2 className="upload-title">Sube tu video aquí</h2>
-          <p className="upload-desc">Arrastra y suelta tu archivo o haz clic para buscar</p>
-          
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleFileChange} 
-            accept="video/*" 
-            className="file-input" 
-          />
-          
-          {file ? (
-            <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem', alignItems: 'center' }}>
-              <div style={{ color: 'var(--accent-primary)', fontWeight: '500' }}>
-                Archivo: {file.name}
-              </div>
-              {!uploadStatus?.success && (
-                <button 
-                  className="btn-primary" 
-                  onClick={handleUpload} 
-                  disabled={isUploading}
-                  style={{ opacity: isUploading ? 0.7 : 1, cursor: isUploading ? 'not-allowed' : 'pointer' }}
-                >
-                  {isUploading ? 'Subiendo...' : 'Procesar Video'}
-                  {!isUploading && (
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polygon points="5 3 19 12 5 21 5 3"/>
-                    </svg>
-                  )}
-                </button>
-              )}
-              {uploadStatus && (
-                <div style={{ 
-                  color: uploadStatus.success ? '#10b981' : '#ef4444', 
-                  backgroundColor: uploadStatus.success ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
-                  padding: '10px 15px',
-                  borderRadius: '8px',
-                  marginTop: '10px',
-                  fontSize: '0.9rem'
-                }}>
-                  {uploadStatus.message}
+          <div className="media-grid">
+            {media.map((item, i) => (
+              <div key={i} className="media-item">
+                <div className="media-thumb">
+                  {item.type === 'video' ? '🎬' : '🎵'}
                 </div>
-              )}
-              {uploadStatus?.success && (
-                <button className="btn-primary" style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'white' }} onClick={() => {setFile(null); setUploadStatus(null);}}>
-                  Subir otro video
-                </button>
-              )}
-            </div>
-          ) : (
-            <button className="btn-primary" onClick={triggerFileInput}>
-              Seleccionar Archivo
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10"/>
-                <line x1="12" y1="8" x2="12" y2="16"/>
-                <line x1="8" y1="12" x2="16" y2="12"/>
-              </svg>
-            </button>
+                <div className="media-info">
+                  <span className="media-name">{item.name}</span>
+                  <button onClick={() => addMediaToTimeline(item)}>Añadir</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Center: Preview Player */}
+        <div className="nle-panel preview-panel">
+          <div className="preview-player glass-panel" style={{ aspectRatio: `${timeline.resolution[0]}/${timeline.resolution[1]}` }}>
+            {renderResult ? (
+              <video src={renderResult} controls autoPlay className="main-video" />
+            ) : activeClip && timeline.tracks[selectedClip.trackIndex].type === 'video' ? (
+              <video src={activeClip.url} controls className="main-video" />
+            ) : (
+              <div className="empty-preview">
+                {renderResult === null ? "Selecciona un clip o Exporta para ver" : ""}
+              </div>
+            )}
+          </div>
+          {renderResult && (
+            <a href={renderResult} download className="btn-primary" style={{marginTop: 15, alignSelf: 'center'}}>
+              Descargar Resultado
+            </a>
           )}
         </div>
 
-        <section className="features-grid">
-          <div className="feature-item glass-panel">
-            <div className="feature-icon">
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        {/* Right: Properties Inspector */}
+        <div className="nle-panel properties-panel">
+          <h3>Propiedades</h3>
+          {activeClip ? (
+            <div className="properties-form">
+              <label>Inicio en timeline (s)
+                <input type="number" step="0.1" value={activeClip.start_time} onChange={e => updateSelectedClip('start_time', parseFloat(e.target.value))} />
+              </label>
+              <label>Fin en timeline (s)
+                <input type="number" step="0.1" value={activeClip.end_time} onChange={e => updateSelectedClip('end_time', parseFloat(e.target.value))} />
+              </label>
+              
+              {timeline.tracks[selectedClip.trackIndex].type === 'video' && (
+                <>
+                  <label>Recorte inicio clip (s)
+                    <input type="number" step="0.1" value={activeClip.media_start} onChange={e => updateSelectedClip('media_start', parseFloat(e.target.value))} />
+                  </label>
+                  <label>Zoom (escala)
+                    <input type="number" step="0.1" value={activeClip.zoom} onChange={e => updateSelectedClip('zoom', parseFloat(e.target.value))} />
+                  </label>
+                  <button className="btn-action" onClick={generateAutoSubs} disabled={isGeneratingSubs}>
+                    {isGeneratingSubs ? 'Generando...' : '✨ Autogenerar Subtítulos'}
+                  </button>
+                </>
+              )}
+
+              {timeline.tracks[selectedClip.trackIndex].type === 'text' && (
+                <>
+                  <label>Texto
+                    <textarea value={activeClip.text} onChange={e => updateSelectedClip('text', e.target.value)} />
+                  </label>
+                  <label>Color
+                    <input type="text" value={activeClip.color} onChange={e => updateSelectedClip('color', e.target.value)} />
+                  </label>
+                </>
+              )}
+
+              <button className="btn-danger" onClick={deleteSelectedClip}>Eliminar Clip</button>
             </div>
-            <h3 className="feature-title">Ultra Rápido</h3>
-            <p className="feature-desc">Acelerado por hardware utilizando tu tarjeta gráfica dedicada AMD RX 6600.</p>
-          </div>
-          <div className="feature-item glass-panel">
-            <div className="feature-icon">
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a10 10 0 1 0 10 10H12V2z"/><path d="M12 12 2.1 12 12 2.1"/></svg>
+          ) : (
+            <p className="text-secondary">Selecciona un clip en la línea de tiempo para editar sus propiedades, o autogenerar subtítulos.</p>
+          )}
+        </div>
+      </div>
+
+      {/* Bottom: Timeline */}
+      <div className="nle-timeline-container glass-panel">
+        <div className="timeline-header">
+          <h3>Línea de Tiempo</h3>
+        </div>
+        
+        <div className="timeline-tracks">
+          {timeline.tracks.map((track, tIdx) => (
+            <div key={track.id} className="timeline-track">
+              <div className="track-info">
+                {track.name}
+              </div>
+              <div className="track-clips">
+                {track.clips.map((clip, cIdx) => {
+                  const left = (clip.start_time / maxDuration) * 100;
+                  const width = ((clip.end_time - clip.start_time) / maxDuration) * 100;
+                  const isSelected = selectedClip?.trackIndex === tIdx && selectedClip?.clipIndex === cIdx;
+                  
+                  return (
+                    <div 
+                      key={clip.id}
+                      className={`timeline-clip ${isSelected ? 'selected' : ''} ${track.type}`}
+                      style={{ left: `${left}%`, width: `${width}%` }}
+                      onClick={() => selectClip(tIdx, cIdx)}
+                    >
+                      {track.type === 'video' ? clip.name : clip.text}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-            <h3 className="feature-title">Alta Precisión</h3>
-            <p className="feature-desc">Impulsado por el modelo Whisper AI para una transcripción y sincronización perfectas.</p>
-          </div>
-          <div className="feature-item glass-panel">
-            <div className="feature-icon">
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          ))}
+        </div>
+        
+        <div className="timeline-ruler">
+          {Array.from({length: Math.ceil(maxDuration)}).map((_, i) => (
+            <div key={i} className="ruler-mark" style={{left: `${(i / maxDuration) * 100}%`}}>
+              {i}s
             </div>
-            <h3 className="feature-title">Todo Local</h3>
-            <p className="feature-desc">Tus videos no se suben a la nube. Todo el proceso es privado y ocurre en tu red local.</p>
-          </div>
-        </section>
-      </main>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }

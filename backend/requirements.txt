@@ -5,3 +5,4 @@ openai-whisper
 pydub
 opencv-python
 python-multipart
+imageio-ffmpeg
